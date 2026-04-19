@@ -1,127 +1,173 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { io } from 'socket.io-client';
-import axios from 'axios';
+import React, { useEffect, useState, useRef } from 'react'
+import { io } from 'socket.io-client'
+import axios from 'axios'
 
-// Create socket outside component to prevent multiple connections on re-render
-const socket = io('http://localhost:5001');
+const socket = io('http://localhost:5001')
 
-export default function Chat({ channelId }) {
-  const [messages, setMessages] = useState([]);
-  const [inputValue, setInputValue] = useState('');
-  const [username, setUsername] = useState('User' + Math.floor(Math.random() * 1000));
-  const messagesEndRef = useRef(null);
+export default function Chat({ channelId, username, token }) {
+  const [messages, setMessages] = useState([])
+  const [inputValue, setInputValue] = useState('')
+  const messagesEndRef = useRef(null)
 
-  // Fetch past messages and setup socket listeners
   useEffect(() => {
-    // 1. Join Socket channel
-    socket.emit('join_channel', channelId);
+    socket.emit('join_channel', { channelId, username })
 
-    // 2. Fetch history (if backend DB is running, it might fail if memory-only, so we catch error)
     axios.get(`http://localhost:5001/api/messages/${channelId}`)
       .then(res => setMessages(res.data))
-      .catch(err => {
-        console.log('Could not fetch history, probably running memory-only mode without DB.');
-        setMessages([]); // reset on channel change
-      });
+      .catch(err => setMessages([]))
 
-    // 3. Listen for new messages
     const handleReceiveMessage = (msg) => {
-      setMessages((prev) => [...prev, msg]);
-    };
+      setMessages((prev) => [...prev, msg])
+    }
 
-    socket.on('receive_message', handleReceiveMessage);
+    socket.on('receive_message', handleReceiveMessage)
 
-    // Cleanup when changing channels
     return () => {
-      socket.off('receive_message', handleReceiveMessage);
-    };
-  }, [channelId]);
+      socket.off('receive_message', handleReceiveMessage)
+    }
+  }, [channelId, username])
 
-  // Scroll to bottom when messages update
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
 
   const handleSend = (e) => {
-    e.preventDefault();
-    if (!inputValue.trim()) return;
+    e.preventDefault()
+    if (!inputValue.trim()) return
 
-    const messageData = {
+    const msgData = {
       channelId,
       sender: username,
-      content: inputValue
-    };
+      content: inputValue,
+      timestamp: new Date().toISOString()
+    }
 
-    socket.emit('send_message', messageData);
-    setInputValue('');
-  };
+    setMessages((prev) => [...prev, msgData])
 
-  const reactToMessage = (msgId, reaction) => {
-    // Basic demonstration of reactions implementation
-    socket.emit('message_reaction', { channelId, messageId: msgId, reaction });
-  };
+    socket.emit('send_message', msgData)
+    setInputValue('')
+  }
+
+  const formatTime = (ts) => {
+    if (!ts) return ''
+    const d = new Date(ts)
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  const renderContent = (content) => {
+    let text = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+    
+    // Strip markdown formatting to make the text clean
+    text = text.replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold
+    text = text.replace(/\*(.*?)\*/g, '$1') // Remove italic
+    text = text.replace(/#{1,6}\s+(.*)/g, '$1') // Remove headers
+    text = text.replace(/---+/g, '') // Remove horizontal rules
+    text = text.replace(/`([^`]+)`/g, '$1') // Remove inline code
+    text = text.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1') // Remove links
+    text = text.trim()
+
+    return text.split('\n').map((line, i) => (
+      <span key={i}>
+        {line}
+        <br />
+      </span>
+    ))
+  }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      
-      {/* Name config (simple simulation of login) */}
-      <div style={{ marginBottom: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <span style={{ color: '#a6adc8' }}>Sending as:</span>
-        <input 
-          value={username} 
-          onChange={(e) => setUsername(e.target.value)} 
-          style={{ padding: '5px 10px', borderRadius: '4px', border: 'none', backgroundColor: '#313244', color: '#cdd6f4' }} 
-        />
-      </div>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', backgroundColor: '#f9fafb' }}>
+      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '20px', padding: '30px' }}>
+        {messages.map((msg, idx) => {
+          const isMe = msg.sender === username
+          const isBot = msg.sender === 'Bot'
+          
+          let bubbleBg = isMe ? '#2563eb' : '#ffffff'
+          let bubbleColor = isMe ? '#ffffff' : '#111827'
+          let bubbleBorder = isMe ? 'none' : '1px solid #e5e7eb'
 
-      {/* Message List */}
-      <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '15px' }}>
-        {messages.map((msg, idx) => (
-          <div key={msg._id || idx} style={{ display: 'flex', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', alignItems: 'baseline', gap: '10px' }}>
-              <span style={{ fontWeight: 'bold', color: '#89b4fa' }}>{msg.sender}</span>
-              <span style={{ fontSize: '0.75rem', color: '#6c7086' }}>
-                {msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString()}
-              </span>
+          if (isBot) {
+            bubbleBg = '#ecfdf5' // light green
+            bubbleColor = '#065f46' // dark green
+            bubbleBorder = '1px solid #10b981'
+          }
+
+          return (
+            <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: isMe ? 'flex-end' : 'flex-start' }}>
+              {!isMe && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px', paddingLeft: '2px' }}>
+                  <span style={{ fontWeight: '600', fontSize: '13px', color: isBot ? '#10b981' : '#6b7280' }}>
+                    {msg.sender}
+                  </span>
+                  <span style={{ fontSize: '11px', color: '#9ca3af' }}>{formatTime(msg.timestamp)}</span>
+                </div>
+              )}
+
+              <div style={{ 
+                maxWidth: '75%', 
+                padding: '12px 16px', 
+                backgroundColor: bubbleBg, 
+                color: bubbleColor, 
+                border: bubbleBorder,
+                borderRadius: '16px', 
+                borderBottomRightRadius: isMe ? '4px' : '16px',
+                borderBottomLeftRadius: !isMe ? '4px' : '16px',
+                fontSize: '15px',
+                lineHeight: '1.5',
+                boxShadow: isMe ? '0 2px 4px rgba(37, 99, 235, 0.2)' : '0 1px 2px rgba(0,0,0,0.05)'
+              }}>
+                {renderContent(msg.content)}
+              </div>
+
+              {isMe && (
+                <div style={{ fontSize: '11px', color: '#9ca3af', marginTop: '4px', paddingRight: '2px' }}>
+                  {formatTime(msg.timestamp)}
+                </div>
+              )}
             </div>
-            <div style={{ marginTop: '5px', color: '#cdd6f4' }}>{msg.content}</div>
-          </div>
-        ))}
+          )
+        })}
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
-      <form onSubmit={handleSend} style={{ display: 'flex', gap: '10px', marginTop: '20px' }}>
-        <input
-          type="text"
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          placeholder={`Message #${channelId}`}
-          style={{ 
-            flex: 1, 
-            padding: '12px', 
-            borderRadius: '8px', 
-            border: '1px solid #45475a', 
-            backgroundColor: '#313244', 
-            color: '#cdd6f4', 
-            outline: 'none' 
-          }}
-        />
-        <button 
-          type="submit" 
-          style={{ 
+      <div style={{ padding: '20px 30px', backgroundColor: '#ffffff', borderTop: '1px solid #e5e7eb' }}>
+        <form onSubmit={handleSend} style={{ display: 'flex', gap: '12px' }}>
+          <input
+            type="text"
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            placeholder="Type a message or @bot to ask AI..."
+            style={{ 
+              flex: 1, 
+              padding: '14px 20px', 
+              background: '#f3f4f6', 
+              color: '#111827', 
+              border: '1px solid #e5e7eb',
+              borderRadius: '24px',
+              fontSize: '15px',
+              outline: 'none',
+              transition: 'border-color 0.2s',
+            }}
+            onFocus={(e) => e.target.style.borderColor = '#2563eb'}
+            onBlur={(e) => e.target.style.borderColor = '#e5e7eb'}
+          />
+          <button type="submit" style={{ 
             padding: '12px 24px', 
-            borderRadius: '8px', 
-            border: 'none', 
-            backgroundColor: '#89b4fa', 
-            color: '#11111b', 
-            fontWeight: 'bold',
-            cursor: 'pointer' 
+            background: '#2563eb', 
+            color: 'white', 
+            border: 'none',
+            borderRadius: '24px',
+            fontWeight: '600',
+            cursor: 'pointer',
+            boxShadow: '0 2px 4px rgba(37,99,235,0.2)',
+            transition: 'background 0.2s'
           }}
-        >
-          Send
-        </button>
-      </form>
+          onMouseOver={(e) => e.target.style.background = '#1d4ed8'}
+          onMouseOut={(e) => e.target.style.background = '#2563eb'}
+          >
+            Send
+          </button>
+        </form>
+      </div>
     </div>
-  );
+  )
 }

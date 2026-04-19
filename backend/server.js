@@ -1,163 +1,103 @@
-require('dotenv').config();
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const mongoose = require('mongoose');
-const cors = require('cors');
-const Message = require('./models/Message');
+require('dotenv').config()
+const express = require('express')
+const http = require('http')
+const { Server } = require('socket.io')
+const mongoose = require('mongoose')
+const cors = require('cors')
+const jwt = require('jsonwebtoken')
+const Message = require('./models/Message')
+const User = require('./models/User')
 
-const app = express();
-app.use(cors());
-app.use(express.json());
+const app = express()
+app.use(cors())
+app.use(express.json())
 
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST']
-  }
-});
+const server = http.createServer(app)
+const io = new Server(server, { cors: { origin: '*' } })
 
-// ─── In-memory fallback store ────────────────────────────────────────────────
-// Used when MongoDB is not available
-let useInMemory = false;
-const inMemoryMessages = {}; // { [channelId]: Message[] }
+const JWT_SECRET = process.env.JWT_SECRET || 'my_super_secret_college_key'
 
-function storeMessage(msg) {
-  if (!inMemoryMessages[msg.channelId]) inMemoryMessages[msg.channelId] = [];
-  inMemoryMessages[msg.channelId].push(msg);
-  // Keep only last 100 messages per channel in memory
-  if (inMemoryMessages[msg.channelId].length > 100) {
-    inMemoryMessages[msg.channelId].shift();
-  }
-}
+const groups = [
+    { id: 'psychology', name: 'Psychology' },
+    { id: 'philosophy', name: 'Philosophy' },
+    { id: 'entertainment', name: 'Entertainment' },
+    { id: 'hollywood', name: 'Hollywood' },
+    { id: 'bollywood', name: 'Bollywood' }
+]
 
-function getMessages(channelId) {
-  return (inMemoryMessages[channelId] || []).slice(-50);
-}
+mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/realtime-collab')
+  .then(() => console.log('✅ mongodb connected'))
+  .catch(err => console.log('❌ mongodb error', err))
 
-// ─── MongoDB connection ───────────────────────────────────────────────────────
-mongoose
-  .connect(process.env.MONGO_URI || 'mongodb://localhost:27017/realtime-collab')
-  .then(() => console.log('✅  MongoDB connected'))
-  .catch((err) => {
-    console.warn('⚠️  MongoDB unavailable — using in-memory store:', err.message);
-    useInMemory = true;
-  });
-
-// ─── Track online users per channel ─────────────────────────────────────────
-const channelUsers = {}; // { [channelId]: Set<{ socketId, username }> }
-
-// ─── Socket.IO events ────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
-  console.log(`🔌 User connected: ${socket.id}`);
+  console.log('user connected', socket.id)
 
-  // ---------- join_channel ---------------------------------------------------
   socket.on('join_channel', async ({ channelId, username }) => {
-    socket.join(channelId);
-    socket.data.channelId = channelId;
-    socket.data.username = username || 'Anonymous';
+    socket.join(channelId)
+    const history = await Message.find({ channelId }).sort({ timestamp: 1 }).limit(50)
+    socket.emit('chat_history', history)
+  })
 
-    // Track presence
-    if (!channelUsers[channelId]) channelUsers[channelId] = new Map();
-    channelUsers[channelId].set(socket.id, socket.data.username);
-
-    console.log(`👤 ${socket.data.username} (${socket.id}) joined channel: ${channelId}`);
-
-    // Notify everyone in channel about the updated user list
-    io.to(channelId).emit('channel_users', Array.from(channelUsers[channelId].values()));
-
-    // Send chat history to the newly joined user
-    try {
-      let history;
-      if (useInMemory) {
-        history = getMessages(channelId);
-      } else {
-        history = await Message.find({ channelId }).sort({ timestamp: 1 }).limit(50);
-      }
-      socket.emit('chat_history', history);
-    } catch (err) {
-      console.error('Error fetching history:', err.message);
-      socket.emit('chat_history', []);
-    }
-  });
-
-  // ---------- send_message ---------------------------------------------------
   socket.on('send_message', async (data) => {
-    // data: { channelId, sender, content }
-    const messageData = {
-      sender: data.sender || socket.data.username || 'Anonymous',
+    const msgData = {
+      sender: data.sender || 'Anonymous',
       content: data.content,
       channelId: data.channelId,
       timestamp: new Date()
-    };
+    }
+    
+    socket.broadcast.to(data.channelId).emit('receive_message', msgData)
+    await new Message(msgData).save()
 
-    // Broadcast to everyone in the channel (including sender for consistency)
-    io.to(data.channelId).emit('receive_message', messageData);
-
-    // Persist
-    if (useInMemory) {
-      storeMessage(messageData);
-    } else {
+    if (data.content.trim().toLowerCase().startsWith('@bot')) {
+      const prompt = data.content.replace(/^@bot/i, '').trim()
+      
       try {
-        const newMessage = new Message(messageData);
-        await newMessage.save();
-      } catch (err) {
-        console.error('DB save failed, storing in memory:', err.message);
-        storeMessage(messageData);
+        const tagsRes = await fetch('http://127.0.0.1:11434/api/tags')
+        const tagsData = await tagsRes.json()
+        const activeModel = tagsData.models && tagsData.models.length > 0 ? tagsData.models[0].name : 'llama3'
+
+        const ollamaRes = await fetch('http://127.0.0.1:11434/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: activeModel, prompt: prompt, stream: false })
+        })
+        const ollamaData = await ollamaRes.json()
+        
+        const botMsg = { sender: 'Bot', content: ollamaData.response, channelId: data.channelId, timestamp: new Date() }
+        io.to(data.channelId).emit('receive_message', botMsg)
+        await new Message(botMsg).save()
+      } catch (e) {
+        const botErrorMsg = { sender: 'Bot', content: 'I am offline right now.', channelId: data.channelId, timestamp: new Date() }
+        io.to(data.channelId).emit('receive_message', botErrorMsg)
+        await new Message(botErrorMsg).save()
       }
     }
-  });
+  })
+})
 
-  // ---------- typing indicator -----------------------------------------------
-  socket.on('typing', ({ channelId, username, isTyping }) => {
-    socket.to(channelId).emit('user_typing', { username, isTyping });
-  });
+app.get('/api/groups', (req, res) => res.json(groups))
 
-  // ---------- message_reaction -----------------------------------------------
-  socket.on('message_reaction', (data) => {
-    // data: { channelId, messageId, reaction, username }
-    io.to(data.channelId).emit('receive_reaction', data);
-  });
+app.post('/api/register', async (req, res) => {
+  const { username, password } = req.body
+  const existing = await User.findOne({ username })
+  if (existing) return res.status(400).json({ error: 'User exists' })
+  await new User({ username, password }).save()
+  res.json({ message: 'User created' })
+})
 
-  // ---------- disconnect -----------------------------------------------------
-  socket.on('disconnect', () => {
-    const { channelId, username } = socket.data;
-    if (channelId && channelUsers[channelId]) {
-      channelUsers[channelId].delete(socket.id);
-      io.to(channelId).emit('channel_users', Array.from(channelUsers[channelId].values()));
-    }
-    console.log(`❌ User disconnected: ${username || socket.id}`);
-  });
-});
+app.post('/api/login', async (req, res) => {
+  const { username, password } = req.body
+  const user = await User.findOne({ username, password })
+  if (!user) return res.status(400).json({ error: 'Invalid creds' })
+  const token = jwt.sign({ username: user.username }, JWT_SECRET)
+  res.json({ token, username: user.username })
+})
 
-// ─── REST endpoints ──────────────────────────────────────────────────────────
-
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', db: useInMemory ? 'in-memory' : 'mongodb' });
-});
-
-// Fetch message history for a channel
 app.get('/api/messages/:channelId', async (req, res) => {
-  try {
-    let messages;
-    if (useInMemory) {
-      messages = getMessages(req.params.channelId);
-    } else {
-      messages = await Message.find({ channelId: req.params.channelId })
-        .sort({ timestamp: 1 })
-        .limit(50);
-    }
-    res.json(messages);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch messages' });
-  }
-});
+  const msgs = await Message.find({ channelId: req.params.channelId }).sort({ timestamp: 1 }).limit(50)
+  res.json(msgs)
+})
 
-// ─── Start server ─────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 5001;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`   Health → http://localhost:${PORT}/health`);
-});
+const port = process.env.PORT || 5001
+server.listen(port, () => console.log(`server is running on port ${port}`))

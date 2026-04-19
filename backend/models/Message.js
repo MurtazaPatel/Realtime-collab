@@ -1,11 +1,11 @@
-const mongoose = require('mongoose');
+const mongoose = require('mongoose')
 
 const messageSchema = new mongoose.Schema({
   sender: { type: String, required: true },
   content: { type: String, required: true },
   channelId: { type: String, required: true },
   timestamp: { type: Date, default: Date.now },
-  reactions: { type: Map, of: Number, default: {} } // Reaction emojis -> count
-});
+  reactions: { type: Map, of: Number, default: {} }
+})
 
-module.exports = mongoose.model('Message', messageSchema);
+module.exports = mongoose.model('Message', messageSchema)
